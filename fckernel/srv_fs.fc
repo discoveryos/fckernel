@@ -1,0 +1,363 @@
+/* srv_fs.fc -- in-memory hierarchical file system (user-space server).
+ *
+ * A real directory tree (not a flat key/value store):
+ *   root = { type:"dir", children: { name -> entry } }
+ *   file = { type:"file", data: "..." }
+ * Paths are normalized (/a/b, "..", ".", auto-created parents) by
+ * fs_resolve. The FS also supports mount points: fs_mount attaches a
+ * fresh tree at a path, and "virtual" files (e.g. /proc/uptime) are
+ * generated on read rather than stored.
+ *
+ * Filesystem ops (syscalls, server "fs"):
+ *   5 = write (a: path, b: data)
+ *   6 = read   (a: path)      -> data
+ *   7 = ls     (a: path)
+ *  19 = listdir (a: path)     (POSIX alias of ls)
+ *   30 = mkdir (a: path)
+ *   31 = rm    (a: path)
+ */
+
+let g_fs_root = syscall(430)
+let g_mounts = syscall(430)
+let g_virt = syscall(430)
+
+func fs_boot() {
+    syscall(432, g_fs_root, "type", "dir")
+    syscall(432, g_fs_root, "children", syscall(430))
+    fs_mkdir("/etc")
+    fs_mkdir("/home")
+    fs_write("/etc/hostname", "fastkernel")
+    fs_write("/etc/motd", "welcome to FastKernel")
+    fs_mkdir("/home/user")
+    fs_write("/home/user/readme.txt", "hello from the filesystem")
+    fs_mount("proc", "/proc")
+    fs_mount("dev", "/dev")
+    syscall(432, g_virt, "/proc/uptime", "dynamic")
+    syscall(432, g_virt, "/proc/kernel", "FastKernel v0.3.0")
+    syscall(432, g_virt, "/dev/kbd", "kbd0")
+    println("[fs] root filesystem ready")
+    return 0
+}
+
+func fs_split(path) {
+    let parts = syscall(56, path, "/")
+    let res = syscall(70)
+    let n = syscall(76, parts)
+    let i = 0
+    while (i < n) {
+        let c = syscall(72, parts, i)
+        if (syscall(76, c) > 0 && c != ".") {
+            syscall(71, res, c)
+        }
+        i = i + 1
+    }
+    return res
+}
+
+func fs_rfind(s, ch) {
+    let n = syscall(76, s)
+    let i = n - 1
+    while (i >= 0) {
+        if (syscall(60, s, i) == ch) {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+func fs_resolve(cwd, path) {
+    let p = path
+    if (syscall(58, path, "/") == 0) {
+        p = cwd + "/" + path
+    }
+    let parts = fs_split(p)
+    let stack = syscall(70)
+    let n = syscall(76, parts)
+    let i = 0
+    while (i < n) {
+        let c = syscall(72, parts, i)
+        if (c == "..") {
+            let sn = syscall(76, stack)
+            if (sn > 0) {
+                syscall(75, stack, sn - 1)
+            }
+        } else {
+            syscall(71, stack, c)
+        }
+        i = i + 1
+    }
+    let buf = syscall(70)
+    syscall(71, buf, "/")
+    let sn = syscall(76, stack)
+    i = 0
+    while (i < sn) {
+        syscall(71, buf, syscall(72, stack, i))
+        if (i < sn - 1) {
+            syscall(71, buf, "/")
+        }
+        i = i + 1
+    }
+    return syscall(57, buf, "")
+}
+
+func fs_lookup(path) {
+    let cur = g_fs_root
+    let parts = fs_split(path)
+    let n = syscall(76, parts)
+    let i = 0
+    while (i < n) {
+        let c = syscall(72, parts, i)
+        let kids = syscall(431, cur, "children")
+        let child = syscall(431, kids, c)
+        if (syscall(436, kids, c) == 0) {
+            return -1
+        }
+        cur = child
+        i = i + 1
+    }
+    return cur
+}
+
+func fs_basename(path) {
+    let i = fs_rfind(path, "/")
+    let n = syscall(76, path)
+    if (i == -1) {
+        return path
+    }
+    return syscall(50, path, i + 1, n)
+}
+
+func fs_parent(path) {
+    let i = fs_rfind(path, "/")
+    if (i <= 0) {
+        return "/"
+    }
+    return syscall(50, path, 0, i)
+}
+
+func fs_ensure_dirs(path) {
+    let p = fs_parent(path)
+    if (p != "/") {
+        fs_ensure_dirs(p)
+    }
+    let e = fs_lookup(path)
+    if (e == -1) {
+        fs_mkdir(path)
+    }
+    return 0
+}
+
+func fs_mkdir(path) {
+    let e = fs_lookup(path)
+    if (e != -1) {
+        println("[fs] mkdir: '" + path + "' already exists")
+        return -1
+    }
+    let p = fs_parent(path)
+    let pe = fs_lookup(p)
+    if (pe == -1) {
+        fs_ensure_dirs(p)
+        pe = fs_lookup(p)
+    }
+    let kids = syscall(431, pe, "children")
+    let ne = syscall(430)
+    syscall(432, ne, "type", "dir")
+    syscall(432, ne, "children", syscall(430))
+    syscall(432, kids, fs_basename(path), ne)
+    println("[fs] mkdir '" + path + "'")
+    return 0
+}
+
+func fs_mount(label, path) {
+    syscall(432, g_mounts, path, label)
+    let e = syscall(430)
+    syscall(432, e, "type", "dir")
+    syscall(432, e, "children", syscall(430))
+    syscall(432, e, "mount", label)
+    let p = fs_parent(path)
+    let pe = fs_lookup(p)
+    let kids = syscall(431, pe, "children")
+    syscall(432, kids, fs_basename(path), e)
+    println("[fs] mounted '" + label + "' at " + path)
+    return 0
+}
+
+func fs_mounts() {
+    let ms = syscall(434, g_mounts)
+    let n = syscall(76, ms)
+    let i = 0
+    println("[fs] " + str(n) + " mount(s)")
+    while (i < n) {
+        let p = syscall(72, ms, i)
+        let l = syscall(431, g_mounts, p)
+        println("    " + str(l) + " on " + str(p))
+        i = i + 1
+    }
+    return 0
+}
+
+func fs_write(path, data) {
+    let p = fs_parent(path)
+    let pe = fs_lookup(p)
+    if (pe == -1) {
+        fs_ensure_dirs(p)
+        pe = fs_lookup(p)
+    }
+    let kids = syscall(431, pe, "children")
+    let name = fs_basename(path)
+    let e = fs_lookup(path)
+    if (e == -1) {
+        e = syscall(430)
+        syscall(432, e, "type", "file")
+        syscall(432, kids, name, e)
+    }
+    syscall(432, e, "data", data)
+    println("[fs] write '" + path + "' = '" + str(data) + "'")
+    return 0
+}
+
+func fs_read(path) {
+    let v = syscall(431, g_virt, path)
+    if (syscall(436, g_virt, path) == 1) {
+        let line = v
+        if (v == "dynamic") {
+            line = "uptime " + str(sched_uptime()) + " ticks"
+        }
+        println("[fs] read '" + path + "' -> '" + str(line) + "'")
+        return line
+    }
+    let e = fs_lookup(path)
+    if (e == -1) {
+        println("[fs] read: '" + path + "' not found")
+        return -1
+    }
+    let d = syscall(431, e, "data")
+    if (syscall(436, e, "data") == 0) {
+        println("[fs] read: '" + path + "' is a directory")
+        return -1
+    }
+    println("[fs] read '" + path + "' -> '" + str(d) + "'")
+    return d
+}
+
+func fs_ls(path) {
+    let e = fs_lookup(path)
+    if (e != -1) {
+        let kids = syscall(431, e, "children")
+        let ks = syscall(434, kids)
+        let n = syscall(76, ks)
+        let i = 0
+        println("[fs] " + path + ":")
+        while (i < n) {
+            let name = syscall(72, ks, i)
+            let c = syscall(431, kids, name)
+            let t = syscall(431, c, "type")
+            let suffix = ""
+            if (t == "dir") {
+                suffix = "/"
+            }
+            println("    " + str(name) + suffix)
+            i = i + 1
+        }
+    }
+    let prefix = path + "/"
+    let vks = syscall(434, g_virt)
+    let vn = syscall(76, vks)
+    let vi = 0
+    let any = 0
+    while (vi < vn) {
+        let vp = syscall(72, vks, vi)
+        if (syscall(58, vp, prefix)) {
+            let pl = syscall(76, prefix)
+            let vl = syscall(76, vp)
+            let name = syscall(50, vp, pl, vl)
+            println("    " + str(name) + "  (virtual)")
+            any = 1
+        }
+        vi = vi + 1
+    }
+    if (e == -1 && any == 0) {
+        println("[fs] ls: '" + path + "' not found")
+        return -1
+    }
+    return 0
+}
+
+func fs_rm(path) {
+    let e = fs_lookup(path)
+    if (e == -1) {
+        println("[fs] rm: '" + path + "' not found")
+        return -1
+    }
+    let p = fs_parent(path)
+    let pe = fs_lookup(p)
+    let kids = syscall(431, pe, "children")
+    syscall(437, kids, fs_basename(path))
+    println("[fs] rm '" + path + "'")
+    return 0
+}
+
+func fs_tree(path, indent) {
+    let e = fs_lookup(path)
+    if (e == -1) {
+        return -1
+    }
+    let kids = syscall(431, e, "children")
+    let ks = syscall(434, kids)
+    let n = syscall(76, ks)
+    let i = 0
+    while (i < n) {
+        let name = syscall(72, ks, i)
+        let c = syscall(431, kids, name)
+        let t = syscall(431, c, "type")
+        let suffix = ""
+        if (t == "dir") {
+            suffix = "/"
+        }
+        println(indent + "  " + str(name) + suffix)
+        if (t == "dir") {
+            let sub = path + "/" + str(name)
+            fs_tree(sub, indent + "  ")
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+func fs_process(m) {
+    let op = syscall(431, m, "op")
+    if (op == 5) {
+        return fs_write(syscall(431, m, "a"), syscall(431, m, "b"))
+    }
+    if (op == 6) {
+        return fs_read(syscall(431, m, "a"))
+    }
+    if (op == 7) {
+        return fs_ls(syscall(431, m, "a"))
+    }
+    if (op == 19) {
+        return fs_ls(syscall(431, m, "a"))
+    }
+    if (op == 30) {
+        return fs_mkdir(syscall(431, m, "a"))
+    }
+    if (op == 31) {
+        return fs_rm(syscall(431, m, "a"))
+    }
+    println("[fs] ERROR: unknown op " + str(op))
+    return -1
+}
+
+func fs_handler(m) {
+    let q = ipc_recv("fs")
+    return fs_process(q)
+}
+
+func fs_task() {
+    let m = ipc_recv("fs")
+    if (m != -1) {
+        fs_process(m)
+    }
+    return 0
+}

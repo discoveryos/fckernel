@@ -1,0 +1,22 @@
+/* consumer.fc -- the receiving half of the peer IPC demo.
+ *
+ * Each time it is scheduled, the consumer drains one message from the
+ * shared "user" mailbox and prints it. When the mailbox is empty it
+ * idles (returns control immediately) -- classic cooperative polling.
+ */
+
+let g_recv = 0
+
+func consumer_unit() {
+    let m = ipc_recv("user")
+    if (m != -1) {
+        let id = syscall(431, m, "id")
+        let a = syscall(431, m, "a")
+        let s = syscall(431, m, "src")
+        g_recv = g_recv + 1
+        println("    [consumer] got msg #" + str(id) + " (payload " + str(a) + ") from " + str(s))
+    } else {
+        println("    [consumer] idle")
+    }
+    return 0
+}

@@ -1,0 +1,27 @@
+/* srv_log.fc -- logger service (user-space server).
+ *
+ * Runs as an independent scheduler task. Receives log requests on its
+ * "log" mailbox and prints them. Both the synchronous syscall path
+ * (kcall drives the handler) and the async task path consume messages
+ * from the same mailbox, so no request is ever processed twice.
+ */
+
+func log_process(m) {
+    let a = syscall(431, m, "a")
+    let src = syscall(431, m, "src")
+    println("[log] " + str(src) + ": " + str(a))
+    return 0
+}
+
+func log_handler(m) {
+    let q = ipc_recv("log")
+    return log_process(q)
+}
+
+func log_task() {
+    let m = ipc_recv("log")
+    if (m != -1) {
+        log_process(m)
+    }
+    return 0
+}

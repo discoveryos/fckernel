@@ -1,0 +1,136 @@
+/* kmem.fc -- first-fit block allocator over a byte-array heap.
+ *
+ * Heap layout: one flat list of integer cells.
+ * Each block (free or used) carries a 2-cell header at address B:
+ *   heap[B]   = block size in cells (including header)
+ *   heap[B+1] = next free block address, or -1 when the block is used
+ * Payload starts at B+2; an allocation returns the payload address.
+ * The free list is singly linked and kept sorted by address so that
+ * adjacent frees can be coalesced back into larger blocks.
+ */
+
+let g_heap = syscall(70)
+let g_heap_size = 0
+let g_free_head = -1
+let g_alloc_count = 0
+
+const HDR = 2
+
+func h_get(i) {
+    return syscall(72, g_heap, i)
+}
+
+func h_set(i, v) {
+    syscall(73, g_heap, i, v)
+    return 0
+}
+
+func mem_init(total) {
+    g_heap_size = total
+    let i = 0
+    while (i < total) {
+        syscall(71, g_heap, 0)
+        i = i + 1
+    }
+    h_set(0, total)
+    h_set(1, -1)
+    g_free_head = 0
+    g_alloc_count = 0
+    return 0
+}
+
+func mem_alloc(n) {
+    let need = n + HDR
+    let prev = -1
+    let cur = g_free_head
+    while (cur != -1) {
+        let size = h_get(cur)
+        if (size >= need) {
+            if (size >= need + HDR + 1) {
+                let rest = cur + need
+                h_set(rest, size - need)
+                h_set(rest + 1, h_get(cur + 1))
+                h_set(cur, need)
+                if (prev == -1) {
+                    g_free_head = rest
+                } else {
+                    h_set(prev + 1, rest)
+                }
+            } else {
+                let nxt = h_get(cur + 1)
+                if (prev == -1) {
+                    g_free_head = nxt
+                } else {
+                    h_set(prev + 1, nxt)
+                }
+            }
+            h_set(cur + 1, -1)
+            g_alloc_count = g_alloc_count + 1
+            return cur + HDR
+        }
+        prev = cur
+        cur = h_get(cur + 1)
+    }
+    return -1
+}
+
+func mem_free(p) {
+    if (p < HDR) {
+        return -1
+    }
+    let b = p - HDR
+    let size = h_get(b)
+    let prev = -1
+    let cur = g_free_head
+    while (cur != -1 && cur < b) {
+        prev = cur
+        cur = h_get(cur + 1)
+    }
+    h_set(b + 1, cur)
+    if (prev == -1) {
+        g_free_head = b
+    } else {
+        h_set(prev + 1, b)
+    }
+    if (prev != -1) {
+        let psz = h_get(prev)
+        if (prev + psz == b) {
+            h_set(prev, psz + size)
+            h_set(prev + 1, cur)
+            b = prev
+            size = psz + size
+        }
+    }
+    if (cur != -1) {
+        let csz = h_get(cur)
+        if (b + size == cur) {
+            h_set(b, size + csz)
+            h_set(b + 1, h_get(cur + 1))
+        }
+    }
+    g_alloc_count = g_alloc_count - 1
+    return 0
+}
+
+func mem_free_bytes() {
+    let free_bytes = 0
+    let cur = g_free_head
+    while (cur != -1) {
+        free_bytes = free_bytes + h_get(cur)
+        cur = h_get(cur + 1)
+    }
+    return free_bytes
+}
+
+func mem_stats() {
+    let free_bytes = 0
+    let blocks = 0
+    let cur = g_free_head
+    while (cur != -1) {
+        free_bytes = free_bytes + h_get(cur)
+        blocks = blocks + 1
+        cur = h_get(cur + 1)
+    }
+    println("mem: heap=" + str(g_heap_size) + " used=" + str(g_heap_size - free_bytes) + " free=" + str(free_bytes) + " freeblocks=" + str(blocks) + " live=" + str(g_alloc_count))
+    return 0
+}

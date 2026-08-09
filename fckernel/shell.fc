@@ -1,0 +1,231 @@
+/* shell.fc -- interactive command shell (user-space process).
+ *
+ * A small sh-style shell. It reads one command per scheduler tick and
+ * dispatches it. Two input modes:
+ *   - script mode (default in the demo): commands are taken from a
+ *     script seeded at boot, so the kernel can run a deterministic
+ *     session.
+ *   - interactive mode: commands come from stdin (blocking input()).
+ *
+ * Built-ins: help, pwd, ls, cd, mkdir, echo (with > redirect), cat,
+ * rm, tree, mount, uptime, mem, ps, exit.
+ */
+
+let g_sh_cwd = "/"
+let g_sh_script = syscall(70)
+let g_sh_interactive = 0
+let g_sh_running = 1
+
+func sh_seed(script) {
+    g_sh_interactive = 0
+    g_sh_script = syscall(56, script, "\n")
+    return 0
+}
+
+func sh_demo_script() {
+    let lines = syscall(70)
+    syscall(71, lines, "help")
+    syscall(71, lines, "pwd")
+    syscall(71, lines, "ls")
+    syscall(71, lines, "ls /home")
+    syscall(71, lines, "cd /home/user")
+    syscall(71, lines, "pwd")
+    syscall(71, lines, "cat readme.txt")
+    syscall(71, lines, "echo hello microkernel > note.txt")
+    syscall(71, lines, "cat note.txt")
+    syscall(71, lines, "mkdir data")
+    syscall(71, lines, "tree /home")
+    syscall(71, lines, "mount")
+    syscall(71, lines, "uptime")
+    syscall(71, lines, "mem")
+    syscall(71, lines, "ps")
+    syscall(71, lines, "exit")
+    return syscall(57, lines, "\n")
+}
+
+func sh_interactive() {
+    g_sh_interactive = 1
+    return 0
+}
+
+func sh_readline() {
+    if (g_sh_interactive) {
+        return syscall(61)
+    }
+    let n = syscall(76, g_sh_script)
+    if (n == 0) {
+        return -1
+    }
+    let line = syscall(72, g_sh_script, 0)
+    syscall(75, g_sh_script, 0)
+    return line
+}
+
+func sh_join(toks, start, to) {
+    let words = syscall(70)
+    let j = start
+    while (j < to) {
+        let w = syscall(72, toks, j)
+        if (syscall(76, w) > 0) {
+            syscall(71, words, w)
+        }
+        j = j + 1
+    }
+    return syscall(57, words, " ")
+}
+
+func sh_help() {
+    println("[shell] built-ins:")
+    println("  help            this list")
+    println("  pwd             print working directory")
+    println("  ls [path]       list a directory")
+    println("  cd <dir>        change directory")
+    println("  mkdir <dir>     create a directory")
+    println("  echo <text> [> <file>]")
+    println("  cat <file>      print a file")
+    println("  rm <file>       remove a file")
+    println("  tree [path]     recursive listing")
+    println("  mount           list mount points")
+    println("  uptime          query the clock server")
+    println("  mem             memory allocator stats")
+    println("  ps              process table")
+    println("  exit            exit the shell")
+    return 0
+}
+
+func sh_exec(line) {
+    let toks = syscall(56, line, " ")
+    let tn = syscall(76, toks)
+    if (tn == 0) {
+        return 0
+    }
+    let cmd = syscall(72, toks, 0)
+
+    if (cmd == "help") {
+        sh_help()
+        return 0
+    }
+    if (cmd == "pwd") {
+        println("[shell] " + g_sh_cwd)
+        return 0
+    }
+    if (cmd == "ls") {
+        let target = "."
+        if (tn >= 2) {
+            target = syscall(72, toks, 1)
+        }
+        fs_ls(fs_resolve(g_sh_cwd, target))
+        return 0
+    }
+    if (cmd == "cd") {
+        let target = "."
+        if (tn >= 2) {
+            target = syscall(72, toks, 1)
+        }
+        let p = fs_resolve(g_sh_cwd, target)
+        let e = fs_lookup(p)
+        if (e == -1) {
+            println("[shell] cd: '" + str(target) + "' not found")
+        } elif (syscall(431, e, "type") != "dir") {
+            println("[shell] cd: '" + str(target) + "' is not a directory")
+        } else {
+            g_sh_cwd = p
+            println("[shell] cwd = " + g_sh_cwd)
+        }
+        return 0
+    }
+    if (cmd == "mkdir") {
+        if (tn < 2) {
+            println("[shell] usage: mkdir <dir>")
+            return 0
+        }
+        fs_mkdir(fs_resolve(g_sh_cwd, syscall(72, toks, 1)))
+        return 0
+    }
+    if (cmd == "echo") {
+        let gt = -1
+        let i = 1
+        while (i < tn) {
+            if (syscall(72, toks, i) == ">") {
+                gt = i
+            }
+            i = i + 1
+        }
+        if (gt != -1) {
+            let text = sh_join(toks, 1, gt)
+            let file = syscall(72, toks, gt + 1)
+            fs_write(fs_resolve(g_sh_cwd, file), text)
+        } else {
+            println(sh_join(toks, 1, tn))
+        }
+        return 0
+    }
+    if (cmd == "cat") {
+        if (tn < 2) {
+            println("[shell] usage: cat <file>")
+            return 0
+        }
+        let p = fs_resolve(g_sh_cwd, syscall(72, toks, 1))
+        let d = fs_read(p)
+        if (d != -1) {
+            println("[shell] " + str(d))
+        }
+        return 0
+    }
+    if (cmd == "rm") {
+        if (tn < 2) {
+            println("[shell] usage: rm <file>")
+            return 0
+        }
+        fs_rm(fs_resolve(g_sh_cwd, syscall(72, toks, 1)))
+        return 0
+    }
+    if (cmd == "tree") {
+        let target = "."
+        if (tn >= 2) {
+            target = syscall(72, toks, 1)
+        }
+        let p = fs_resolve(g_sh_cwd, target)
+        println("[shell] tree of " + p)
+        fs_tree(p, "")
+        return 0
+    }
+    if (cmd == "mount") {
+        fs_mounts()
+        return 0
+    }
+    if (cmd == "uptime") {
+        let t = kcall(8, 0, 0)
+        println("[shell] uptime " + str(t) + " ticks")
+        return 0
+    }
+    if (cmd == "mem") {
+        kcall(4, 0, 0)
+        return 0
+    }
+    if (cmd == "ps") {
+        kcall(10, 0, 0)
+        return 0
+    }
+    if (cmd == "exit") {
+        println("[shell] exiting")
+        g_sh_running = 0
+        posix_exit(0)
+        return 0
+    }
+    println("[shell] unknown command: '" + str(cmd) + "' (try 'help')")
+    return 0
+}
+
+func shell_tick() {
+    if (g_sh_running == 0) {
+        return 0
+    }
+    let line = sh_readline()
+    if (line == -1) {
+        return 0
+    }
+    println("[shell] " + g_sh_cwd + "> " + str(line))
+    sh_exec(line)
+    return 0
+}

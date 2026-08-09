@@ -1,0 +1,162 @@
+/* kernel.fc -- FastKernel boot and demo.
+ *
+ * A toy microkernel written entirely in FastCode.
+ *
+ *   kernel core (privileged, minimal)
+ *     kmem      first-fit memory allocator
+ *     ksched    cooperative process scheduler (PIDs, wait/wake)
+ *     kipc      message-passing IPC (mailboxes)
+ *     ksyscall  system-call layer
+ *
+ *   user space (server processes, independent scheduler tasks)
+ *     srv_log     logger server        (mailbox "log")
+ *     srv_fs      in-memory fs server  (mailbox "fs")
+ *     srv_clock   clock server         (mailbox "clock")
+ *     srv_display X-org-style display server (mailbox "disp")
+ *     kbd         keyboard device process feeding the display server
+ *
+ *   user space (processes)
+ *     init (pid 1) spawns and supervises: hello, echo, posixapp,
+ *     xclient, worker (respawned), waiter/baby (blocking wait).
+ *
+ * Everything user-visible flows through kcall(): the kernel turns a
+ * syscall into an IPC message and hands it to the owning server.
+ */
+
+from kconsole import *
+from kmem import *
+from ksched import *
+from kipc import *
+from ksyscall import *
+from srv_log import *
+from srv_fs import *
+from srv_clock import *
+from srv_display import *
+from posix import *
+from init import *
+from shell import *
+
+import "apps/hello.fc"
+import "apps/echo.fc"
+import "apps/posixapp.fc"
+import "apps/xclient.fc"
+import "apps/producer.fc"
+import "apps/consumer.fc"
+
+let g_seq = 0
+
+func fib_k(n) {
+    if (n < 2) {
+        return n
+    }
+    return fib_k(n - 1) + fib_k(n - 2)
+}
+
+func task_log_unit() {
+    let n = g_seq + 1
+    g_seq = n
+    kcall(1, "log-task: wrote entry #" + str(n), 0)
+    return 0
+}
+
+func task_math_unit() {
+    let n = g_seq + 1
+    g_seq = n
+    let r = fib_k(n + 8)
+    println("    [math] fib(" + str(n + 8) + ") = " + str(r))
+    return 0
+}
+
+func task_video_unit() {
+    let n = g_seq + 1
+    g_seq = n
+    println("    [video] drew frame #" + str(n))
+    return 0
+}
+
+func boot() {
+    kboot()
+    klog("booting kernel core")
+    mem_init(1024)
+    mem_stats()
+    ipc_init()
+    klog("booting filesystem server")
+    fs_boot()
+    klog("installing syscall ABI")
+    ksys_init()
+    return 0
+}
+
+func spawn_kernel_procs() {
+    klog("kernel: spawning init (pid 1) and system servers")
+    proc_create("init", fn() {
+        init_tick()
+        return 0
+    }, 0, 1, 0)
+    proc_create("srv_log", fn() {
+        log_task()
+        return 0
+    }, 0, 1, 0)
+    proc_create("srv_fs", fn() {
+        fs_task()
+        return 0
+    }, 0, 1, 0)
+    proc_create("srv_clock", fn() {
+        clock_task()
+        return 0
+    }, 0, 1, 0)
+    proc_create("srv_disp", fn() {
+        disp_task()
+        return 0
+    }, 0, 1, 0)
+    proc_create("kbd", fn() {
+        kbd_task()
+        return 0
+    }, 0, 1, 0)
+    klog("kernel: spawning demo processes")
+    proc_create("producer", fn() {
+        producer_unit()
+        return 0
+    }, 5, 0, 0)
+    proc_create("consumer", fn() {
+        consumer_unit()
+        return 0
+    }, 5, 0, 0)
+    proc_create("log", fn() {
+        task_log_unit()
+        return 0
+    }, 3, 0, 0)
+    proc_create("math", fn() {
+        task_math_unit()
+        return 0
+    }, 4, 0, 0)
+    proc_create("video", fn() {
+        task_video_unit()
+        return 0
+    }, 5, 0, 0)
+    return 0
+}
+
+func main() {
+    boot()
+    spawn_kernel_procs()
+    kbd_arm("HELLO")
+    klog("init: loading user programs")
+    init_boot()
+    klog("spawning shell with demo script")
+    sh_seed(sh_demo_script())
+    proc_create("shell", fn() {
+        shell_tick()
+        return 0
+    }, 40, 0, 1)
+    klog("starting scheduler (cooperative round-robin)")
+    let all = sched_run(400)
+    println("")
+    println("[kernel] scheduler exit: all_done=" + str(all) + " total_ticks=" + str(sched_uptime()))
+    sched_status()
+    mem_stats()
+    klog("system halted")
+    return 0
+}
+
+main()

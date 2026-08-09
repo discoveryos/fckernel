@@ -1,0 +1,49 @@
+/* xclient.fc -- an X client (user program) on the display server.
+ *
+ * Speaks the display protocol over the syscall ABI: creates windows,
+ * draws strings into them and flushes (the server composites and
+ * renders). It then reads keyboard events produced by the kbd process
+ * and finally destroys its windows. A classic X round-trip, minus the
+ * socket.
+ */
+
+let g_xphase = 0
+let g_win_a = 0
+let g_win_b = 0
+
+func xclient_unit() {
+    g_xphase = g_xphase + 1
+    if (g_xphase == 1) {
+        kcall(1, "xclient: connecting to display server", 0)
+        g_win_a = kcall7(20, 1, 2, 28, 7, "terminal")
+        g_win_b = kcall7(20, 31, 2, 28, 7, "stats")
+        kcall7(24, g_win_a, 0, 1, 0, "FastKernel 0.3.0")
+        kcall7(24, g_win_a, 1, 1, 0, "POSIX subsystem: ON")
+        kcall7(24, g_win_b, 0, 1, 0, "ticks=" + str(sched_uptime()))
+        kcall7(24, g_win_b, 1, 1, 0, "srv_display: OK")
+        kcall(26, g_win_a, 0)
+        println("[xclient] windows created, waiting for input")
+    } elif (g_xphase == 2) {
+        let k = kcall(27, g_win_a, 0)
+        if (k != -1) {
+            println("[xclient] key event: '" + str(k) + "'")
+            kcall7(24, g_win_a, 3, 1, 0, "key: " + str(k))
+        } else {
+            println("[xclient] no key event yet")
+        }
+        kcall(26, g_win_a, 0)
+    } elif (g_xphase == 3) {
+        let k = kcall(27, g_win_a, 0)
+        if (k != -1) {
+            println("[xclient] key event: '" + str(k) + "'")
+            kcall7(24, g_win_a, 3, 1, 0, "key: " + str(k))
+        }
+        kcall(26, g_win_a, 0)
+    } else {
+        kcall(21, g_win_a, 0)
+        kcall(21, g_win_b, 0)
+        kcall(26, 0, 0)
+        println("[xclient] windows destroyed")
+    }
+    return 0
+}

@@ -1,0 +1,24 @@
+/* kio.fc -- kernel I/O services (blocking line input over syscall 61) */
+
+let g_kbd = syscall(70)
+
+func kio_readline(prompt) {
+    if (syscall(76, prompt) > 0) {
+        println(prompt)
+    }
+    return syscall(61)
+}
+
+func kio_write(msg) {
+    println(msg)
+    return 0
+}
+
+func kio_pushc(c) {
+    syscall(71, g_kbd, c)
+    return 0
+}
+
+func kio_bufsize() {
+    return syscall(76, g_kbd)
+}

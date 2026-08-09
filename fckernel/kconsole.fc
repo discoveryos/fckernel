@@ -1,0 +1,27 @@
+/* kconsole.fc -- kernel console services */
+
+func kputs(msg) {
+    println(msg)
+    return 0
+}
+
+func klog(msg) {
+    println("[kernel] " + msg)
+    return 0
+}
+
+func kboot() {
+    println("========================================================")
+    println("   FastKernel v0.1.0  -  a toy micro-kernel in FastCode")
+    println("========================================================")
+    return 0
+}
+
+func kpanic(msg) {
+    println("--------------------------------------------------------")
+    println("  KERNEL PANIC  |  " + msg)
+    println("  system halted")
+    println("--------------------------------------------------------")
+    panic(msg)
+    return 0
+}

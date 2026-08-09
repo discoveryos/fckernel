@@ -1,0 +1,230 @@
+/* ksched.fc -- cooperative round-robin process scheduler (kernel core).
+ *
+ * Every schedulable entity is a *process* with a unique PID.
+ * A process is a dict { pid, name, fn, state, ran, left, mode,
+ *                       parent, children, waiters, exitcode, maxleft,
+ *                       respawns, maxrespawn }.
+ *
+ *   state:  0 READY, 1 RUNNING, 2 EXITED, 3 BLOCKED
+ *   mode:   0 finite (left counts down, then exits),
+ *           1 server (runs forever, returns to READY)
+ *   fn:     stateless closure; each call performs one unit of work
+ *   left:   work units remaining (finite processes only)
+ *
+ * A process can block itself by calling proc_wait(pid); the scheduler
+ * keeps it BLOCKED until the waited-on process exits, which wakes it.
+ * init (pid 1) supervises: it spawns user processes, reaps exited
+ * children and can respawn them.
+ */
+
+let g_procs = syscall(430)
+let g_proc_order = syscall(70)
+let g_ticks = 0
+let g_last = 0
+let g_current = ""
+let g_current_pid = 0
+let g_pid_next = 0
+
+func proc_current() {
+    return g_current_pid
+}
+
+func proc_current_name() {
+    return g_current
+}
+
+func sched_uptime() {
+    return g_ticks
+}
+
+func proc_state(pid) {
+    let p = syscall(431, g_procs, pid)
+    if (syscall(436, g_procs, pid) == 0) {
+        return -1
+    }
+    return syscall(431, p, "state")
+}
+
+func proc_name(pid) {
+    let p = syscall(431, g_procs, pid)
+    return syscall(431, p, "name")
+}
+
+func proc_set_respawn(pid, n) {
+    let p = syscall(431, g_procs, pid)
+    syscall(432, p, "maxrespawn", n)
+    return 0
+}
+
+func proc_create(name, f, left, mode, parent) {
+    g_pid_next = g_pid_next + 1
+    let pid = g_pid_next
+    let p = syscall(430)
+    syscall(432, p, "pid", pid)
+    syscall(432, p, "name", name)
+    syscall(432, p, "fn", f)
+    syscall(432, p, "state", 0)
+    syscall(432, p, "ran", 0)
+    syscall(432, p, "left", left)
+    syscall(432, p, "maxleft", left)
+    syscall(432, p, "mode", mode)
+    syscall(432, p, "parent", parent)
+    syscall(432, p, "children", syscall(70))
+    syscall(432, p, "waiters", syscall(70))
+    syscall(432, p, "exitcode", 0)
+    syscall(432, p, "respawns", 0)
+    syscall(432, p, "maxrespawn", 0)
+    syscall(432, g_procs, pid, p)
+    syscall(71, g_proc_order, pid)
+    if (parent != 0) {
+        let pp = syscall(431, g_procs, parent)
+        let kids = syscall(431, pp, "children")
+        syscall(71, kids, pid)
+    }
+    println("[proc] spawned '" + name + "' pid=" + str(pid) + " left=" + str(left) + " mode=" + str(mode) + " parent=" + str(parent))
+    return pid
+}
+
+func proc_exit(pid, code) {
+    let p = syscall(431, g_procs, pid)
+    let st = syscall(431, p, "state")
+    if (st == 2) {
+        return 0
+    }
+    syscall(432, p, "state", 2)
+    syscall(432, p, "exitcode", code)
+    let name = syscall(431, p, "name")
+    println("[proc] pid=" + str(pid) + " '" + name + "' exited with code " + str(code))
+    let ws = syscall(431, p, "waiters")
+    let wn = syscall(76, ws)
+    let i = 0
+    while (i < wn) {
+        let w = syscall(72, ws, i)
+        let wp = syscall(431, g_procs, w)
+        if (syscall(431, wp, "state") == 3) {
+            syscall(432, wp, "state", 0)
+            println("[proc] pid=" + str(w) + " woken (was waiting on pid=" + str(pid) + ")")
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+func proc_wait(pid) {
+    let child = syscall(431, g_procs, pid)
+    let st = syscall(431, child, "state")
+    if (st == 2) {
+        return syscall(431, child, "exitcode")
+    }
+    let me = g_current_pid
+    let mep = syscall(431, g_procs, me)
+    syscall(432, mep, "state", 3)
+    let ws = syscall(431, child, "waiters")
+    syscall(71, ws, me)
+    return -1
+}
+
+func sched_block(name) {
+    let pid = g_current_pid
+    let p = syscall(431, g_procs, pid)
+    syscall(432, p, "state", 3)
+    return 0
+}
+
+func sched_wake(pid) {
+    let p = syscall(431, g_procs, pid)
+    let st = syscall(431, p, "state")
+    if (st == 3) {
+        syscall(432, p, "state", 0)
+    }
+    return 0
+}
+
+func sched_tick() {
+    let n = syscall(76, g_proc_order)
+    if (n == 0) {
+        return 1
+    }
+    let i = g_last
+    let k = 0
+    while (k < n) {
+        let pid = syscall(72, g_proc_order, i)
+        let t = syscall(431, g_procs, pid)
+        let st = syscall(431, t, "state")
+        if (st == 0) {
+            syscall(432, t, "state", 1)
+            g_ticks = g_ticks + 1
+            g_current = syscall(431, t, "name")
+            g_current_pid = pid
+            let f = syscall(431, t, "fn")
+            f()
+            let st2 = syscall(431, t, "state")
+            if (st2 == 3) {
+                println("tick " + str(g_ticks) + ": '" + g_current + "' pid=" + str(pid) + " BLOCKED")
+            } elif (st2 == 2) {
+            } else {
+                let ran = syscall(431, t, "ran") + 1
+                syscall(432, t, "ran", ran)
+                let mode = syscall(431, t, "mode")
+                if (mode == 1) {
+                    syscall(432, t, "state", 0)
+                } else {
+                    let left = syscall(431, t, "left") - 1
+                    syscall(432, t, "left", left)
+                    if (left <= 0) {
+                        proc_exit(pid, 0)
+                    } else {
+                        syscall(432, t, "state", 0)
+                    }
+                }
+            }
+            g_last = (i + 1) % n
+            return 0
+        }
+        i = (i + 1) % n
+        k = k + 1
+    }
+    return 1
+}
+
+func sched_run(max_ticks) {
+    let tick = 0
+    while (tick < max_ticks) {
+        let all_done = sched_tick()
+        if (all_done) {
+            return 1
+        }
+        tick = tick + 1
+    }
+    return 0
+}
+
+func sched_status() {
+    let n = syscall(76, g_proc_order)
+    let i = 0
+    while (i < n) {
+        let pid = syscall(72, g_proc_order, i)
+        let t = syscall(431, g_procs, pid)
+        let st = syscall(431, t, "state")
+        let name = syscall(431, t, "name")
+        let ran = syscall(431, t, "ran")
+        let left = syscall(431, t, "left")
+        let mode = syscall(431, t, "mode")
+        let code = syscall(431, t, "exitcode")
+        let stname = "READY"
+        if (st == 1) {
+            stname = "RUNNING"
+        } elif (st == 2) {
+            stname = "EXIT"
+        } elif (st == 3) {
+            stname = "BLOCKED"
+        }
+        let tag = "proc"
+        if (mode == 1) {
+            tag = "server"
+        }
+        println("[sched] pid=" + str(pid) + " '" + name + "' " + tag + " state=" + stname + " ran=" + str(ran) + " left=" + str(left) + " code=" + str(code))
+        i = i + 1
+    }
+    return 0
+}

@@ -1,0 +1,119 @@
+/* init.fc -- PID 1: the init process.
+ *
+ * In a microkernel (as in Unix) init is the first process spawned by
+ * the kernel and the ancestor of every user process. It spawns the
+ * user programs, then supervises them: exited children are reaped and,
+ * when configured, respawned.
+ */
+
+let g_init_phase = 0
+let g_baby_pid = 0
+let g_baby_run = 0
+let g_worker_run = 0
+
+func init_boot() {
+    proc_create("hello", fn() {
+        hello_main()
+        return 0
+    }, 1, 0, 1)
+    proc_create("echo", fn() {
+        echo_main()
+        return 0
+    }, 1, 0, 1)
+    proc_create("posixapp", fn() {
+        posixapp_main()
+        return 0
+    }, 1, 0, 1)
+    proc_create("xclient", fn() {
+        xclient_unit()
+        return 0
+    }, 4, 0, 1)
+    let wpid = proc_create("worker", fn() {
+        worker_unit()
+        return 0
+    }, 0, 1, 1)
+    proc_set_respawn(wpid, 1)
+    proc_create("waiter", fn() {
+        waiter_unit()
+        return 0
+    }, 0, 1, 1)
+    println("[init] user processes spawned")
+    return 0
+}
+
+func init_tick() {
+    let p = syscall(431, g_procs, 1)
+    let kids = syscall(431, p, "children")
+    let n = syscall(76, kids)
+    let i = n - 1
+    while (i >= 0) {
+        let pid = syscall(72, kids, i)
+        let child = syscall(431, g_procs, pid)
+        let st = syscall(431, child, "state")
+        if (st == 2) {
+            let code = syscall(431, child, "exitcode")
+            let name = syscall(431, child, "name")
+            let rn = syscall(431, child, "respawns")
+            let max = syscall(431, child, "maxrespawn")
+            println("[init] reaped '" + name + "' pid=" + str(pid) + " code=" + str(code))
+            if (rn < max) {
+                syscall(432, child, "state", 0)
+                syscall(432, child, "ran", 0)
+                syscall(432, child, "left", syscall(431, child, "maxleft"))
+                syscall(432, child, "respawns", rn + 1)
+                println("[init] respawning '" + name + "' (run " + str(rn + 1) + ")")
+            } else {
+                syscall(75, kids, i)
+            }
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+func worker_unit() {
+    g_worker_run = g_worker_run + 1
+    let run = g_worker_run
+    if (run == 1) {
+        println("    [worker] run #" + str(run) + ": BUG -- exiting with error code 1")
+        proc_exit(proc_current(), 1)
+        return 0
+    }
+    println("    [worker] run #" + str(run) + ": OK (exit 0)")
+    proc_exit(proc_current(), 0)
+    return 0
+}
+
+func baby_unit() {
+    g_baby_run = g_baby_run + 1
+    println("    [baby] working (" + str(g_baby_run) + "/2)")
+    if (g_baby_run >= 2) {
+        proc_exit(proc_current(), 0)
+    }
+    return 0
+}
+
+func waiter_unit() {
+    if (g_init_phase == 0) {
+        g_baby_pid = proc_create("baby", fn() {
+            baby_unit()
+            return 0
+        }, 2, 0, proc_current())
+        println("[waiter] spawned baby pid=" + str(g_baby_pid))
+        g_init_phase = 1
+        let st = proc_wait(g_baby_pid)
+        if (st == -1) {
+            println("[waiter] blocking until baby exits")
+            return 0
+        }
+    }
+    if (g_init_phase == 1) {
+        let st = proc_wait(g_baby_pid)
+        if (st == -1) {
+            return 0
+        }
+        println("[waiter] baby exited with code " + str(st))
+        g_init_phase = 2
+    }
+    return 0
+}

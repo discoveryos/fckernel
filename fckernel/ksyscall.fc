@@ -1,0 +1,154 @@
+/* ksyscall.fc -- microkernel system-call layer.
+ *
+ * The only way a user program can reach kernel or server functionality.
+ * Every syscall is turned into an IPC message:
+ *   - kernel-core services (memory, processes, POSIX process controls)
+ *     are handled directly by the kernel -- no context switch.
+ *   - user-space services are reached by sending the message to the
+ *     owning server's mailbox and letting the server process it.
+ *
+ * ABI (documented in README.md):
+ *   microkernel services
+ *     1  log        log a message via the logger server
+ *     2  mem_alloc  allocate n cells (kernel core)
+ *     3  mem_free   free a previously allocated address (kernel core)
+ *     4  mem_stats  print allocator stats (kernel core)
+ *     5  fs_write   store data under a key (fs server)
+ *     6  fs_read    read data by key (fs server)
+ *     7  fs_list    list all stored keys (fs server)
+ *     8  uptime     query the clock server
+ *     9  info       print kernel info (kernel core)
+ *    10  sched_list print process table (kernel core)
+ *
+ *   POSIX subsystem (kernel core unless noted)
+ *    11  posix_write(fd, buf)
+ *    12  posix_read(fd)
+ *    13  posix_open(path)      -> fd
+ *    14  posix_close(fd)
+ *    15  posix_getpid
+ *    16  posix_exit(code)
+ *    17  posix_nanosleep(ns)
+ *    18  posix_clock_gettime
+ *    19  posix_listdir          (fs server)
+ *
+ *   display subsystem (disp server)
+ *    20  XCreateWindow   a=x  b=y  c=w  d=h  s=title
+ *    21  XDestroyWindow  a=win id
+ *    22  XMapWindow      a=win id
+ *    23  XUnmapWindow    a=win id
+ *    24  XDrawString     a=win id  b=row  c=col  s=text
+ *    25  XFillRect       a=win id
+ *    26  XFlush          a=win id
+ *    27  XNextEvent      a=win id
+ */
+
+let g_sys = syscall(430)
+let g_fds = syscall(430)
+let g_fd_next = 3
+
+func kreg(id, server, handler) {
+    let e = syscall(430)
+    syscall(432, e, "server", server)
+    syscall(432, e, "handler", handler)
+    syscall(432, g_sys, id, e)
+    return 0
+}
+
+func kcall(id, a, b) {
+    return kcall7(id, a, b, 0, 0, "")
+}
+
+func kcall7(id, a, b, c, d, s) {
+    let msg = ipc_msg7("user", id, a, b, c, d, s)
+    let e = syscall(431, g_sys, id)
+    if (syscall(436, g_sys, id) == 0) {
+        println("[syscall] ERROR: unknown syscall " + str(id))
+        return -1
+    }
+    let server = syscall(431, e, "server")
+    let handler = syscall(431, e, "handler")
+    if (server != "kernel") {
+        ipc_send(server, msg)
+    }
+    return handler(msg)
+}
+
+func posix_write_h(fd, buf) {
+    if (fd == 1) {
+        println("[posix] stdout: " + str(buf))
+        return 0
+    }
+    if (fd == 2) {
+        println("[posix] stderr: " + str(buf))
+        return 0
+    }
+    return -1
+}
+
+func posix_open_h(path) {
+    let fd = g_fd_next
+    g_fd_next = g_fd_next + 1
+    syscall(432, g_fds, fd, path)
+    return fd
+}
+
+func posix_read_h(fd) {
+    let path = syscall(431, g_fds, fd)
+    if (syscall(436, g_fds, fd) == 0) {
+        return -1
+    }
+    return fs_read(path)
+}
+
+func posix_close_h(fd) {
+    syscall(437, g_fds, fd)
+    return 0
+}
+
+func ksys_init() {
+    kreg(2, "kernel", fn(m) { return mem_alloc(syscall(431, m, "a")) })
+    kreg(3, "kernel", fn(m) { return mem_free(syscall(431, m, "a")) })
+    kreg(4, "kernel", fn(m) {
+        mem_stats()
+        return 0
+    })
+    kreg(9, "kernel", fn(m) {
+        println("FastKernel v0.3.0 -- microkernel")
+        println("core: procs, ipc, mem | servers: log, fs, clock, disp")
+        println("POSIX subsystem: syscalls 11-19 | X protocol: 20-27")
+        return 0
+    })
+    kreg(10, "kernel", fn(m) {
+        sched_status()
+        return 0
+    })
+    kreg(11, "kernel", fn(m) {
+        return posix_write_h(syscall(431, m, "a"), syscall(431, m, "b"))
+    })
+    kreg(12, "kernel", fn(m) { return posix_read_h(syscall(431, m, "a")) })
+    kreg(13, "kernel", fn(m) { return posix_open_h(syscall(431, m, "a")) })
+    kreg(14, "kernel", fn(m) { return posix_close_h(syscall(431, m, "a")) })
+    kreg(15, "kernel", fn(m) { return proc_current() })
+    kreg(16, "kernel", fn(m) {
+        proc_exit(proc_current(), syscall(431, m, "a"))
+        return 0
+    })
+    kreg(17, "kernel", fn(m) { return 0 })
+    kreg(18, "kernel", fn(m) { return sched_uptime() })
+    kreg(1, "log", fn(m) { return log_handler(m) })
+    kreg(5, "fs", fn(m) { return fs_handler(m) })
+    kreg(6, "fs", fn(m) { return fs_handler(m) })
+    kreg(7, "fs", fn(m) { return fs_handler(m) })
+    kreg(8, "clock", fn(m) { return clock_handler(m) })
+    kreg(19, "fs", fn(m) { return fs_handler(m) })
+    kreg(20, "disp", fn(m) { return disp_handler(m) })
+    kreg(21, "disp", fn(m) { return disp_handler(m) })
+    kreg(22, "disp", fn(m) { return disp_handler(m) })
+    kreg(23, "disp", fn(m) { return disp_handler(m) })
+    kreg(24, "disp", fn(m) { return disp_handler(m) })
+    kreg(25, "disp", fn(m) { return disp_handler(m) })
+    kreg(26, "disp", fn(m) { return disp_handler(m) })
+    kreg(27, "disp", fn(m) { return disp_handler(m) })
+    println("[syscall] ABI ready (27 services)")
+    return 0
+}

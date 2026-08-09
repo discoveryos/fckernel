@@ -1,0 +1,18 @@
+/* echo.fc -- a user program using the file and clock services.
+ *
+ * Exercises message-passing to two different user-space servers:
+ * the in-memory file service (write/read/list) and the clock service
+ * (uptime).
+ */
+
+func echo_main() {
+    kcall(1, "echo.fc: storing files via the fs server", 0)
+    kcall(5, "greeting", "hello from echo.fc")
+    kcall(5, "answer", "42")
+    let v = kcall(6, "greeting", 0)
+    println("[user echo] fs_read('greeting') -> '" + str(v) + "'")
+    kcall(7, "/", 0)
+    let t = kcall(8, 0, 0)
+    println("[user echo] uptime reported by clock server: " + str(t))
+    return 0
+}

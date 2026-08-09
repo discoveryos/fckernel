@@ -1,0 +1,16 @@
+/* producer.fc -- a user program that talks to another user program.
+ *
+ * Demonstrates peer-to-peer IPC: the producer task posts a message to
+ * the shared "user" mailbox (mediated by the kernel's kipc layer) each
+ * time the scheduler runs it. The consumer task drains that mailbox.
+ */
+
+let g_sent = 0
+
+func producer_unit() {
+    g_sent = g_sent + 1
+    let m = ipc_msg("producer", 100, g_sent, 0)
+    ipc_send("user", m)
+    println("    [producer] sent msg #" + str(g_sent))
+    return 0
+}

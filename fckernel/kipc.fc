@@ -1,0 +1,68 @@
+/* kipc.fc -- inter-process communication (kernel core).
+ *
+ * Microkernel message passing. Every addressable endpoint is a "port":
+ * a kernel-managed mailbox (queue) of messages. Messages are dicts:
+ *   { src, op, a, b }
+ * ipc_send is non-blocking (enqueue); ipc_recv pops the oldest message
+ * or returns -1 when the mailbox is empty. Servers drain their mailbox
+ * from their scheduler slot; synchronous syscalls hand messages to
+ * servers directly through kcall.
+ */
+
+let g_ports = syscall(430)
+let g_msg_seq = 0
+
+func ipc_init() {
+    syscall(432, g_ports, "log", syscall(70))
+    syscall(432, g_ports, "fs", syscall(70))
+    syscall(432, g_ports, "clock", syscall(70))
+    syscall(432, g_ports, "user", syscall(70))
+    syscall(432, g_ports, "disp", syscall(70))
+    println("[ipc] ports ready")
+    return 0
+}
+
+func ipc_create(name) {
+    syscall(432, g_ports, name, syscall(70))
+    return 0
+}
+
+func ipc_msg(src, op, a, b) {
+    return ipc_msg7(src, op, a, b, 0, 0, "")
+}
+
+func ipc_msg7(src, op, a, b, c, d, s) {
+    g_msg_seq = g_msg_seq + 1
+    let m = syscall(430)
+    syscall(432, m, "id", g_msg_seq)
+    syscall(432, m, "src", src)
+    syscall(432, m, "op", op)
+    syscall(432, m, "a", a)
+    syscall(432, m, "b", b)
+    syscall(432, m, "c", c)
+    syscall(432, m, "d", d)
+    syscall(432, m, "s", s)
+    return m
+}
+
+func ipc_send(port, msg) {
+    let q = syscall(431, g_ports, port)
+    syscall(71, q, msg)
+    return 0
+}
+
+func ipc_recv(port) {
+    let q = syscall(431, g_ports, port)
+    let n = syscall(76, q)
+    if (n == 0) {
+        return -1
+    }
+    let m = syscall(72, q, 0)
+    syscall(75, q, 0)
+    return m
+}
+
+func ipc_pending(port) {
+    let q = syscall(431, g_ports, port)
+    return syscall(76, q)
+}

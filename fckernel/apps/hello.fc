@@ -1,0 +1,19 @@
+/* hello.fc -- a user program loaded into FastKernel.
+ *
+ * The classic hello-world of a microkernel: it reaches services only
+ * through the system-call ABI (kcall), never touching kernel internals.
+ * It logs via the logger server and allocates memory from the kernel
+ * core.
+ */
+
+func hello_main() {
+    kcall(9, 0, 0)
+    kcall(1, "hello.fc: hello from userland", 0)
+    kcall(1, "hello.fc: requesting memory from kernel core", 0)
+    let addr = kcall(2, 64, 0)
+    println("[user hello] mem_alloc(64) -> " + str(addr))
+    kcall(3, addr, 0)
+    kcall(4, 0, 0)
+    kcall(1, "hello.fc: done", 0)
+    return 0
+}

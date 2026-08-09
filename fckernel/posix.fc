@@ -1,0 +1,47 @@
+/* posix.fc -- POSIX subsystem library.
+ *
+ * A thin libc-style wrapper over the kernel's POSIX syscall ABI
+ * (syscalls 11-19). User programs link against this instead of talking
+ * to the microkernel directly; a real port would trap through a libc
+ * into these same service ids.
+ */
+
+func posix_write(fd, buf) {
+    return kcall(11, fd, buf)
+}
+
+func posix_read(fd) {
+    return kcall(12, fd, 0)
+}
+
+func posix_open(path) {
+    return kcall(13, path, 0)
+}
+
+func posix_close(fd) {
+    return kcall(14, fd, 0)
+}
+
+func posix_getpid() {
+    return kcall(15, 0, 0)
+}
+
+func posix_exit(code) {
+    return kcall(16, code, 0)
+}
+
+func posix_nanosleep(ns) {
+    return kcall(17, ns, 0)
+}
+
+func posix_clock_gettime() {
+    return kcall(18, 0, 0)
+}
+
+func posix_listdir() {
+    return kcall(19, "/", 0)
+}
+
+func posix_create(path, data) {
+    return kcall(5, path, data)
+}

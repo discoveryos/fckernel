@@ -1,0 +1,33 @@
+/* srv_clock.fc -- clock/timer service (user-space server).
+ *
+ * The clock server owns its own counter and answers uptime requests
+ * (syscall 8) via its mailbox. Its scheduler task emits periodic
+ * heartbeats, showing a server doing independent background work.
+ */
+
+let g_clock = 0
+
+func clock_process(m) {
+    let op = syscall(431, m, "op")
+    if (op == 8) {
+        return sched_uptime()
+    }
+    return -1
+}
+
+func clock_handler(m) {
+    let q = ipc_recv("clock")
+    return clock_process(q)
+}
+
+func clock_task() {
+    g_clock = g_clock + 1
+    if (g_clock % 3 == 0) {
+        println("[clock] heartbeat #" + str(g_clock) + " (uptime " + str(sched_uptime()) + ")")
+    }
+    return 0
+}
+
+func clock_value() {
+    return g_clock
+}

@@ -1,0 +1,306 @@
+/* srv_display.fc -- X-org-style display server (user-space server).
+ *
+ * The display server owns the virtual screen and every window, exactly
+ * like an X server owns the physical display. Clients never touch the
+ * screen directly: they send display requests over IPC and the server
+ * composites and renders. This is the classic X protocol split.
+ *
+ * Screen: SCR_W x SCR_H cells, rendered to the terminal on XFlush.
+ * Windows: { id, x, y, w, h, title, vis, rows } where rows is a list
+ *          of client-area lines (w-2 chars wide, h-2 lines tall).
+ *
+ * Display protocol (syscalls 20-27, server "disp"):
+ *   20 XCreateWindow  a=x  b=y  c=w d=h  s=title        -> win id
+ *   21 XDestroyWindow a=win id
+ *   22 XMapWindow     a=win id
+ *   23 XUnmapWindow   a=win id
+ *   24 XDrawString    a=win id  b=row  c=col  s=text
+ *   25 XFillRect      a=win id   (clear client area)
+ *   26 XFlush         a=win id   (composite + render screen)
+ *   27 XNextEvent     a=win id   -> next key event (char) or -1
+ *
+ * The keyboard "device" is the kbd process: while armed it feeds one
+ * character per scheduler tick into the server's input queue. A real
+ * driver would do the same from interrupt-handler state.
+ */
+
+const SCR_W = 60
+const SCR_H = 18
+
+let g_fb = syscall(70)
+
+func fb_alloc() {
+    let i = 0
+    while (i < SCR_W * SCR_H) {
+        syscall(71, g_fb, ".")
+        i = i + 1
+    }
+    return 0
+}
+
+let g_fb_init = fb_alloc()
+let g_windows = syscall(430)
+let g_win_seq = 0
+let g_focus = 0
+let g_input = syscall(70)
+let g_kbd_armed = 0
+let g_kbd_idx = 0
+let g_kbd_text = ""
+
+func pad_to(s, n) {
+    let cur = syscall(76, s)
+    if (cur >= n) {
+        return syscall(50, s, 0, n)
+    }
+    let need = n - cur
+    let i = 0
+    let buf = syscall(70)
+    syscall(71, buf, s)
+    while (i < need) {
+        syscall(71, buf, " ")
+        i = i + 1
+    }
+    return syscall(57, buf, "")
+}
+
+func fill_str(n, ch) {
+    let i = 0
+    let buf = syscall(70)
+    while (i < n) {
+        syscall(71, buf, ch)
+        i = i + 1
+    }
+    return syscall(57, buf, "")
+}
+
+func fb_put(x, y, ch) {
+    if (x < 0 || x >= SCR_W) {
+        return 0
+    }
+    if (y < 0 || y >= SCR_H) {
+        return 0
+    }
+    syscall(73, g_fb, y * SCR_W + x, ch)
+    return 0
+}
+
+func fb_put_str(x, y, s) {
+    let n = syscall(76, s)
+    let i = 0
+    while (i < n) {
+        fb_put(x + i, y, syscall(60, s, i))
+        i = i + 1
+    }
+    return 0
+}
+
+func disp_create(m) {
+    let x = syscall(431, m, "a")
+    let y = syscall(431, m, "b")
+    let w = syscall(431, m, "c")
+    let h = syscall(431, m, "d")
+    let t = syscall(431, m, "s")
+    g_win_seq = g_win_seq + 1
+    let wid = g_win_seq
+    let win = syscall(430)
+    syscall(432, win, "id", wid)
+    syscall(432, win, "x", x)
+    syscall(432, win, "y", y)
+    syscall(432, win, "w", w)
+    syscall(432, win, "h", h)
+    syscall(432, win, "title", t)
+    syscall(432, win, "vis", 1)
+    let cw = w - 2
+    let ch = h - 2
+    let rows = syscall(70)
+    let blank = fill_str(cw, " ")
+    let i = 0
+    while (i < ch) {
+        syscall(71, rows, blank)
+        i = i + 1
+    }
+    syscall(432, win, "rows", rows)
+    syscall(432, g_windows, wid, win)
+    g_focus = wid
+    return wid
+}
+
+func disp_draw(m) {
+    let wid = syscall(431, m, "a")
+    let row = syscall(431, m, "b")
+    let col = syscall(431, m, "c")
+    let text = syscall(431, m, "s")
+    let win = syscall(431, g_windows, wid)
+    if (syscall(436, g_windows, wid) == 0) {
+        return -1
+    }
+    let rows = syscall(431, win, "rows")
+    let old = syscall(72, rows, row)
+    let cw = syscall(431, win, "w") - 2
+    let tlen = syscall(76, text)
+    let pre = syscall(50, old, 0, col)
+    let tail_start = col + tlen
+    if (tail_start > cw) {
+        tail_start = cw
+    }
+    let tail = syscall(50, old, tail_start, cw)
+    let nrow = pre + text + tail
+    syscall(73, rows, row, nrow)
+    return 0
+}
+
+func disp_fill(m) {
+    let wid = syscall(431, m, "a")
+    let win = syscall(431, g_windows, wid)
+    if (syscall(436, g_windows, wid) == 0) {
+        return -1
+    }
+    let rows = syscall(431, win, "rows")
+    let cw = syscall(431, win, "w") - 2
+    let ch = syscall(431, win, "h") - 2
+    let blank = fill_str(cw, " ")
+    let i = 0
+    while (i < ch) {
+        syscall(73, rows, i, blank)
+        i = i + 1
+    }
+    return 0
+}
+
+func disp_vis(m, on) {
+    let wid = syscall(431, m, "a")
+    let win = syscall(431, g_windows, wid)
+    if (syscall(436, g_windows, wid) == 0) {
+        return -1
+    }
+    syscall(432, win, "vis", on)
+    return 0
+}
+
+func disp_destroy(m) {
+    let wid = syscall(431, m, "a")
+    syscall(437, g_windows, wid)
+    return 0
+}
+
+func disp_render() {
+    let i = 0
+    let total = SCR_W * SCR_H
+    while (i < total) {
+        syscall(73, g_fb, i, ".")
+        i = i + 1
+    }
+    let ws = syscall(434, g_windows)
+    let wn = syscall(76, ws)
+    let wi = 0
+    while (wi < wn) {
+        let wid = syscall(72, ws, wi)
+        let win = syscall(431, g_windows, wid)
+        let vis = syscall(431, win, "vis")
+        if (vis == 1) {
+            let x = syscall(431, win, "x")
+            let y = syscall(431, win, "y")
+            let w = syscall(431, win, "w")
+            let h = syscall(431, win, "h")
+            let title = syscall(431, win, "title")
+            let cw = w - 2
+            let titlebar = "+" + pad_to(title, cw) + "+"
+            let divider = "+" + fill_str(cw, "-") + "+"
+            let rows = syscall(431, win, "rows")
+            let r = 0
+            fb_put_str(x, y, titlebar)
+            while (r < h - 2) {
+                let line = "|" + syscall(72, rows, r) + "|"
+                fb_put_str(x, y + 1 + r, line)
+                r = r + 1
+            }
+            fb_put_str(x, y + h - 1, divider)
+        }
+        wi = wi + 1
+    }
+    let ry = 0
+    while (ry < SCR_H) {
+        let line = syscall(70)
+        let cx = 0
+        while (cx < SCR_W) {
+            syscall(71, line, syscall(72, g_fb, ry * SCR_W + cx))
+            cx = cx + 1
+        }
+        println(syscall(57, line, ""))
+        ry = ry + 1
+    }
+    return 0
+}
+
+func disp_next_key(m) {
+    let n = syscall(76, g_input)
+    if (n == 0) {
+        return -1
+    }
+    let k = syscall(72, g_input, 0)
+    syscall(75, g_input, 0)
+    return k
+}
+
+func disp_process(m) {
+    let op = syscall(431, m, "op")
+    if (op == 20) {
+        return disp_create(m)
+    }
+    if (op == 21) {
+        return disp_destroy(m)
+    }
+    if (op == 22) {
+        return disp_vis(m, 1)
+    }
+    if (op == 23) {
+        return disp_vis(m, 0)
+    }
+    if (op == 24) {
+        return disp_draw(m)
+    }
+    if (op == 25) {
+        return disp_fill(m)
+    }
+    if (op == 26) {
+        disp_render()
+        return 0
+    }
+    if (op == 27) {
+        return disp_next_key(m)
+    }
+    println("[disp] ERROR: unknown op " + str(op))
+    return -1
+}
+
+func disp_handler(m) {
+    let q = ipc_recv("disp")
+    return disp_process(q)
+}
+
+func disp_task() {
+    let m = ipc_recv("disp")
+    if (m != -1) {
+        disp_process(m)
+    }
+    return 0
+}
+
+func kbd_arm(text) {
+    g_kbd_text = text
+    g_kbd_idx = 0
+    g_kbd_armed = 1
+    return 0
+}
+
+func kbd_task() {
+    if (g_kbd_armed) {
+        let n = syscall(76, g_kbd_text)
+        if (g_kbd_idx < n) {
+            let ch = syscall(60, g_kbd_text, g_kbd_idx)
+            syscall(71, g_input, ch)
+            g_kbd_idx = g_kbd_idx + 1
+        }
+    }
+    return 0
+}

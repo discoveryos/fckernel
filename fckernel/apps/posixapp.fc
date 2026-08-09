@@ -1,0 +1,26 @@
+/* posixapp.fc -- a user program exercising the POSIX subsystem.
+ *
+ * Uses only POSIX-style calls (posix_write/read/open/close/getpid/
+ * exit/nanosleep/clock_gettime/listdir). Demonstrates the fd table and
+ * the file service backing regular files.
+ */
+
+func posixapp_main() {
+    println("[posixapp] pid=" + str(posix_getpid()))
+    posix_write(1, "hello from posix write(1, ...)")
+    posix_write(2, "note: this goes to stderr")
+    posix_create("/etc/hostname", "fastkernel")
+    posix_create("/etc/motd", "welcome to fastkernel microkernel")
+    let fd = posix_open("/etc/hostname")
+    let line = posix_read(fd)
+    println("[posixapp] open('/etc/hostname') -> fd " + str(fd) + ", read -> '" + str(line) + "'")
+    posix_close(fd)
+    posix_listdir()
+    let t = posix_clock_gettime()
+    println("[posixapp] clock_gettime -> " + str(t) + " ticks")
+    posix_nanosleep(1000)
+    println("[posixapp] posix_exit(0)")
+    posix_exit(0)
+    println("[posixapp] after exit (should not print)")
+    return 0
+}
