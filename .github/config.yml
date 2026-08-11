@@ -1,0 +1,9 @@
+extended-languages:
+  Fastcode:
+    type: programming
+    color: "#ff8c00"
+    extensions:
+      - .fc
+    tm_scope: source.fastcode
+    ace_mode: text
+    grammar: discoveryos/fastcode-grammer
